@@ -779,6 +779,159 @@ flake8 swift/common/ring/builder.py swift/common/ring/composite_builder.py \
 The experiments remain the evidence for real process kills, real concurrent
 readers, and before/after comparisons against other checkouts.
 
+### Experiment 12 and integrated SAIO atomic-save validation
+
+| | |
+| --- | --- |
+| Supports | Adds a topology-change atomic-save scenario through experiment 12, then runs the required save-path experiments alongside real local SAIO object traffic. The integrated run checks save-test execution and request overlap separately. |
+| Command | `bash experiments/run_saio_atomic_under_load.sh` |
+| Expected runtime | Approximately 25 minutes of sustained traffic across five cases, plus dataset seeding, final verification, and cleanup. This is a duration target, not a hard wall-clock limit. |
+| Expected output | Per-case experiment verdicts, followed by separate `ATOMIC-SAVE CHECKS`, `BACKGROUND TRAFFIC`, and `CLEANUP` summaries, an exit code, and the report location. `INCOMPLETE` means required execution or overlap evidence was not established; it is not a failed atomic-save assertion and is not a verified pass. |
+
+#### Experiment 12: additional purpose
+
+`exp12_topology_change_atomic_save.py` adds a topology-change scenario to the
+save-path validation. Its purpose is to cover saving changed topology state,
+rather than relying on object traffic alone as evidence that builder saves
+were exercised. It complements the interruption, handled-failure, durability
+ordering, and composite-save checks in the other experiments.
+
+The integrated runner invokes experiment 12 once for each workload case,
+alongside experiments 2–4 and 6–11. Graders do not need to launch experiment 12
+separately for this SAIO procedure. The experiment's name does not imply that
+the harness deploys new live rings: the integrated run does not modify live
+SAIO rings or establish correctness during live rebalance or object migration.
+
+#### Prerequisites
+
+Run the SAIO experiments on the team's **Ubuntu-SAIO** Lightsail instance.
+Graders must select **Ubuntu-SAIO** in the Lightsail console and connect to
+that instance; do not use the separate SwiftBugFix instance for this procedure.
+Ubuntu-SAIO contains the prepared local Swift deployment and mounted SAIO
+storage required by the integrated runner.
+
+Run as the normal `ubuntu` user, not as root and not with `sudo bash`.
+
+The checkout must include `saio_atomic_under_load.py`,
+`run_saio_atomic_under_load.sh`, `saio_scale_tests_expanded.py`, experiments
+2–4 and 6–12, and their support files in `experiments/`. The expanded workload
+script must be the version supporting `--sustain` and the runner's readiness
+marker. Use the checkout containing these submitted files; do not switch to
+an older branch that lacks them.
+
+The launcher is sufficient to start the integrated test on that prepared
+instance. It selects `.venv/bin/python` automatically and prepares only the
+private scratch parent when needed; `sudo` may prompt for that directory setup.
+It does not install or start SAIO, create the virtual environment, mount or
+format storage, or provision a fresh machine. If it refuses a prerequisite,
+inspect the message rather than resetting the existing SAIO storage.
+
+The default local authentication is `http://127.0.0.1:8080/auth/v1.0`, user
+`test:tester`, and key `testing`. If the prepared instance uses different
+credentials, set `ST_AUTH`, `ST_USER`, and `ST_KEY` accordingly. Only the local
+SAIO authentication endpoints accepted by the workload are permitted.
+
+#### How to run the integrated experiment
+
+From a prepared checkout:
+
+```bash
+cd /path/to/EC528_swift
+bash experiments/run_saio_atomic_under_load.sh
+echo "exit=$?"
+```
+
+#### In the team's LightSail instance
+
+```bash
+cd /home/ubuntu/EC528_swift
+bash experiments/run_saio_atomic_under_load.sh
+echo "exit=$?"
+```
+
+Manual virtual-environment activation is not required for the shell launcher.
+For the available runner options without starting tests:
+
+```bash
+bash experiments/run_saio_atomic_under_load.sh --help
+```
+
+This is the single SAIO entry point for grading. Do not run a second,
+standalone scale-test suite: the runner launches and instruments
+`saio_scale_tests_expanded.py` internally as its background workload.
+
+The default run selects all five cases sequentially:
+
+| Case | Configured object slots and sizes | Workers | Required experiment executions |
+| --- | --- | --- | --- |
+| Smoke | 8 slots, 16 KiB each | 2 | 10 |
+| Small | 2,000 slots, 16 KiB each | 8 | 10 |
+| Medium | 512 slots, 1 MiB each | 8 | 10 |
+| Large | 32 slots, 32 MiB each | 4 | 10 |
+| Mixed | 256 slots: 181 at 64 KiB, 50 at 1 MiB, 25 at 8 MiB | 8 | 10 |
+
+Each case seeds its dataset, starts a 300-second sustained workload, runs one
+round of the ten save experiments, then completes integrity verification and
+cleanup before the next case. There are 50 required experiment executions in
+total; this counts experiment processes, not the individual assertions within
+each script. Save checks run back-to-back after traffic readiness, not repeatedly
+throughout all five minutes.
+
+All cases use the sustained operation policy with their respective populations
+and sizes. Occupied slots select GET, overwrite, HEAD, or DELETE; selecting an
+empty slot recreates it with PUT. Thus the live object population can fluctuate
+within the configured slot limit. Builder-save experiments run separately from
+these object requests, with their temporary directories placed on the mounted
+SAIO storage filesystem. The live topology remains fixed.
+
+#### Expected result and interpreting INCOMPLETE
+
+Inspect all three verdicts separately:
+
+- `ATOMIC-SAVE CHECKS`: requires successful experiment execution and verified
+  request overlap for every required execution.
+- `BACKGROUND TRAFFIC`: reports workload completion and object-request errors
+  separately; errors are not automatically attributed to the save changes.
+- `CLEANUP`: reports whether workload completion/cleanup was verified and
+  whether cleanup errors were recorded.
+
+`INCOMPLETE` is not `FAIL`. It means the runner could not establish all the
+required evidence. For example, an experiment can exit successfully with
+`test_execution: "PASS"`, while no successful request both starts and finishes
+inside its short process interval. The strict overlap rule then produces
+`status: "INCOMPLETE"` and `overlap_verified: false`, even if traffic was still
+running. This does not establish a failed save assertion, but it also must not
+be counted as an overlap-verified pass. Timeouts, exit `77`, terminated processes,
+or missing executions can also leave evidence incomplete; inspect the recorded
+reason rather than assuming every incomplete result is a coverage gap.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | All required atomic-save checks passed with overlap, and traffic/cleanup completed cleanly. |
+| `1` | At least one experiment was classified as a failure; inspect its log. |
+| `2` | Required evidence is incomplete or a runner error occurred. This is distinct from an atomic-save failure and is not a clean pass. |
+| `3` | Atomic-save checks passed, but background traffic or cleanup has warnings/errors. |
+| `77` | Preflight refused; the required environment was not available. No pass or assertion failure is established. |
+
+The runner prints the report location under
+`experiment-results/atomic-under-load-<timestamp>-<id>/`. Inspect its
+`summary.json` for overall and per-case verdicts. Each case directory includes
+per-experiment logs/JSON, `traffic.log`, the instrumented workload, traffic
+reports and request CSVs, and `object_errors.json`.
+
+To print the report, replace the placeholder with the actual run directory:
+
+```bash
+.venv/bin/python -m json.tool \
+    experiment-results/atomic-under-load-<timestamp>-<id>/summary.json
+```
+
+For an incomplete execution, compare `test_execution`, `exit_code`,
+`overlap_verified`, and `successful_requests_fully_during_experiment` in the
+summary and inspect that experiment's log. Do not reinterpret incomplete
+coverage as either an assertion failure or a verified pass.
+
+
 ## 5. Claims and limitations
 
 Experiment 2 tests process interruption before and after replacement. Experiment 3 tests handled failures, preservation of the previous builder, and temporary-file cleanup. Experiment 4 checks the durability operation order. Experiments 5–11 test the composite-builder fix: experiment 5 runs upstream's composite unit tests, experiments 6–9 repeat the partial-serialization, process-interruption, handled-failure, and durability-order checks for the composite file, experiment 10 covers relative and new paths, repeated saves, the persisted format, and a concurrent reader, and experiment 11 checks file permissions. These experiments do not test multiple concurrent writers, actual power loss, or performance.
