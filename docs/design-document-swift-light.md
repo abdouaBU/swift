@@ -14,7 +14,7 @@ hold it: the primary first, then the remaining replicas, then a set of substitut
 the list.  
 A client asks the proxy for that list, then talks to the storage nodes directly.
 
-<img src="Pictures/swift-light-architecturt-actual.png" width="600">
+<img src="Pictures/swift-light-architecture-actual.png" width="1000">
 
 ### Read in Swift Light
 
@@ -37,7 +37,11 @@ replica is down. If the quorum is never reached, the command fails.
 <img src="Pictures/swift-light-write-path.png" width="600">
 
 ### Adding/Removing a node to/from the cluster
-<TODO: Complete>
+
+When adding/removing a node to/from the cluster, a new version of the ring, marking the complete state, is generated.
+It's then persisted to disk so that on reboot, this information is not lost. The actual ring then gradually moves
+toward that completed version by updating 1 vnode at a time. Along with the ring update, actual data transfer happens
+in background as well. 
 
 ### Atomic save
 
@@ -197,12 +201,6 @@ Each case is a real request to a deployed cluster, so its time includes TCP setu
 and HTTP overhead as well as the save itself. The absolute per-case numbers are
 therefore not comparable to Experiment 5's in-process timings; only the atomic and
 non-atomic runs of this experiment are compared with each other, on the same machine.
-
-#### Short version
-
-The entire exp0 runs 10000 saves twice: once in atomic mode and once in non-atomic mode. The whole process takes more than
-one hour, so we provide a simplified version of exp0 containing only 200 saves: 100 ring saves and 100 file saves. We
-recommend running this instead to get a sence of the atomic overhead.
 
 ### Experiment 1: acknowledged replicas return the uploaded bytes
 
