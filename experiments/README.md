@@ -265,7 +265,8 @@ collection or import error in `composite_builder.py` is reported as `77`, not as
 a result. `--dry-run` prints the command without running it.
 
 **Runtime:** normally seconds, with a 600-second limit. **Expected result:**
-`43 passed`, a result block, `RESULT: PASS`, and exit `0`.
+`58 passed` (upstream's 43 tests plus the 15 composite atomic-save unit tests
+below), a result block, `RESULT: PASS`, and exit `0`.
 
 **Interpretation:** none of upstream's composite tests interrupts or fails a
 save, so this is regression evidence only; experiments 6–10 test the fix. It
@@ -444,6 +445,31 @@ the table above.
 These experiments target only `CompositeRingBuilder.save()`; they do not
 re-test the component builders' own saves, multiple concurrent writers,
 power-loss recovery, or running-cluster client behavior.
+
+### Atomic-save unit tests in Swift's test suite
+
+The bug-fix experiments' checks are also integrated into Swift's own unit suite,
+so they run with every change in Swift's CI:
+
+- `test/unit/common/ring/test_builder.py`, `TestRingBuilder`: 12 save tests
+  covering partial serialization; explicit-flush, `fsync`, rename, and
+  failed-first-save failures; a failing cleanup; the durability order; a stale
+  temporary file; a bare relative path; and repeated saves.
+- `test/unit/common/ring/test_composite_builder.py`, `TestCompositeRingBuilder`:
+  15 new tests covering the same failures plus a retry after failure, readers
+  seeing the old or new file across the rename, a new path, repeated saves, and
+  file permissions.
+
+```bash
+python3 -m pytest test/unit/common/ring/test_builder.py \
+    test/unit/common/ring/test_composite_builder.py -k save -v -p no:cacheprovider
+```
+
+**Runtime:** a few seconds. **Expected result:** all 28 save tests `PASSED`; the
+changed files also pass `flake8`. The kill and concurrent-reader experiments are
+represented by deterministic checks of the on-disk state at each step; the
+experiments above remain the evidence for real process kills, real concurrent
+readers, and before/after comparisons.
 
 ## Swift Light experiments
 

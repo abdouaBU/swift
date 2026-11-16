@@ -12,6 +12,8 @@ atomic-save mechanism.
 
 The updated implementation performs the following steps:
 
+0. **Absolute destination:** `builder_file` is converted to an absolute path with `os.path.abspath()`, so the temporary file's directory and the rename destination are always real directories, including when `swift-ring-builder` is run from the ring directory with a bare name such as `object.builder`.
+
 1. **Temporary file creation:** `NamedTemporaryFile(mode='wb', dir=<destination directory>, prefix=<destination name>, delete=False)` creates a uniquely named temporary file beside the destination builder file. The name starts with the destination's filename and ends with a random suffix chosen by Python's `tempfile` module.
 
 2. **Serialization:** The builder state is serialized into the temporary file using `pickle.dump()`.
@@ -20,7 +22,7 @@ The updated implementation performs the following steps:
 
 4. **Atomic replacement:** Swift's `renamer()` helper replaces the destination builder file with the completed temporary file, using `fsync=True`.
 
-5. **Failure handling:** If an exception occurs, the implementation attempts to remove the temporary file. If a new builder ID was assigned during the failed save, it is reset to `None`.
+5. **Failure handling:** Steps 1–4 run inside one `try` block, so an exception at any of them, including a failed rename, is handled the same way: the implementation attempts to remove the temporary file, resets a builder ID that was newly assigned during the failed save to `None`, and re-raises the original exception.
 
 ### Architecture Diagram
 ![RingBuilder Atomic Save Architecture](Pictures/ringbuilder-architecture.png)
@@ -92,15 +94,18 @@ Using one protocol for both files means a builder file and its composite
 metadata behave the same way when a save is interrupted, and reviewers see the
 existing Swift helper rather than a new mechanism.
 
-### Composite Builder: Absolute Destination Path
+### Both Builders: Absolute Destination Path
 
 Swift's `renamer()` creates the destination's directory before renaming, and
 `os.path.dirname()` of a bare file name is the empty string, for which that
-step fails. Upstream's `open()` handled bare names, and upstream's own
-`test_abs_paths_persisted` saves a composite with a relative name. Converting
-`path_to_file` to an absolute path once, at the start of `save()`, keeps that
-behavior and gives the temporary file, the rename, and `saved_path` the same
-location.
+step fails. Upstream's `open()` handled bare names: `swift-ring-builder` is
+commonly run from the ring directory with a bare builder name, and upstream's
+own `test_abs_paths_persisted` saves a composite with a relative name.
+Converting the destination to an absolute path once, at the start of
+`save()`, keeps that behavior and gives the temporary file and the rename the
+same location. `RingBuilder.save()` does this for `builder_file`, and
+`CompositeRingBuilder.save()` does it for `path_to_file`, which also becomes
+the recorded `saved_path`.
 
 ### Composite Builder: Metadata Before the File
 
@@ -142,9 +147,15 @@ The whole environment is built by one script. On a clean Ubuntu 24.04 machine:
 
 ```bash
 git clone https://github.com/HankWang05/EC528_swift
-cd <cloned swift repo directory>
-bash experiments/bug_fix/setup.sh
+cd EC528_swift
+git switch demo3bugs
+bash experiments/setup.sh
 ```
+
+The experiment scripts and `setup.sh` are on the `demo3bugs` branch of
+`EC528_swift`, in its `experiments/` directory. The copies in this course
+repository's `experiments/bug_fix/` are identical and are included for
+submission.
 
 What the script does
 
@@ -444,7 +455,7 @@ not accepted as proof of the complete protocol.
 | Supports | Upstream's composite builder tests still pass after the change: compose, save, load, the persisted metadata format, relative-path saving, save errors, and the cooperative builder. Regression evidence only; no upstream test interrupts a save. |
 | Command | `python3 experiments/exp5_composite_unittests.py --swift-src "$PWD"` |
 | Expected runtime | Normally seconds; 600-second default timeout. |
-| Expected output | A banner per phase — `environment`, `swift checkout`, `dependencies`, then pytest's own summary — ending in `43 passed`, a `result` block, and `RESULT: PASS`. |
+| Expected output | A banner per phase — `environment`, `swift checkout`, `dependencies`, then pytest's own summary — ending in `58 passed` (upstream's 43 tests plus the 15 composite atomic-save unit tests described below), a `result` block, and `RESULT: PASS`. |
 
 The runner executes `test/unit/common/ring/test_composite_builder.py` and nothing
 else. An import or collection error in `composite_builder.py` is reported as
@@ -734,6 +745,40 @@ echo "exit=$?"
 A passing run ends with `exit=0`. Only the final file's permission bits are
 checked, not ownership or ACLs.
 
+### Atomic-save unit tests in Swift's test suite
+
+The checks from the experiments are also part of Swift's own unit suite, so they
+run with every change in Swift's CI. They live beside the existing save tests:
+
+| File | Class | Tests |
+| --- | --- | --- |
+| `test/unit/common/ring/test_builder.py` | `TestRingBuilder` | 12 save tests: `test_save`, `test_save_load`, `test_save_partial_dump_does_nothing`, explicit-flush, `fsync`, rename, and failed-first-save failures, a failing cleanup, the durability order, a stale temporary file, a bare relative path, and repeated saves. |
+| `test/unit/common/ring/test_composite_builder.py` | `TestCompositeRingBuilder` | 15 new tests: partial serialization, explicit-flush, `fsync`, rename, and failed-first-save failures, a failing cleanup, a retry after failure, the durability order, readers seeing the old or new file across the rename, a stale temporary file, a new path, repeated saves, and two permission checks. |
+
+Each test injects one failure with `mock.patch` around the real
+`NamedTemporaryFile`, `os.fsync`, and `os.rename`, then checks the exact error,
+byte-identical old contents, successful loading and placement, and that no
+temporary file is left. The kill and concurrent-reader experiments are
+represented by deterministic checks of the on-disk state at each step: a process
+killed at that step would leave the same state.
+
+```bash
+cd /home/ubuntu/EC528_swift
+source .venv/bin/activate
+python3 -m pytest test/unit/common/ring/test_builder.py \
+    test/unit/common/ring/test_composite_builder.py -k save -v -p no:cacheprovider
+flake8 swift/common/ring/builder.py swift/common/ring/composite_builder.py \
+    test/unit/common/ring/test_builder.py test/unit/common/ring/test_composite_builder.py
+```
+
+| | |
+| --- | --- |
+| Expected runtime | A few seconds. |
+| Expected output | 28 save tests, each `PASSED`, and no flake8 output. |
+
+The experiments remain the evidence for real process kills, real concurrent
+readers, and before/after comparisons against other checkouts.
+
 ## 5. Claims and limitations
 
 Experiment 2 tests process interruption before and after replacement. Experiment 3 tests handled failures, preservation of the previous builder, and temporary-file cleanup. Experiment 4 checks the durability operation order. Experiments 5–11 test the composite-builder fix: experiment 5 runs upstream's composite unit tests, experiments 6–9 repeat the partial-serialization, process-interruption, handled-failure, and durability-order checks for the composite file, experiment 10 covers relative and new paths, repeated saves, the persisted format, and a concurrent reader, and experiment 11 checks file permissions. These experiments do not test multiple concurrent writers, actual power loss, or performance.
@@ -743,3 +788,19 @@ instance from the `demo3bugs` checkout, and all of them pass on `demo3bugs`,
 which contains both fixes. Run with `--swift-src` against separate worktrees,
 experiments 2–4 pass against `bugfix` and fail against `master`, and experiment 1
 passes against `bugfix` and reports `SKIP (test not found)` against `master`.
+The 28 atomic-save unit tests pass on `demo3bugs`, and the changed files pass
+flake8.
+
+### Objectives
+
+Every bug-fix objective from the [design proposal](design-proposal.md) is complete:
+
+| Objective | Status | Evidence |
+| --- | --- | --- |
+| Make `RingBuilder.save()` atomic | Done | Section 1; experiments 1–4; `TestRingBuilder` save tests |
+| Make `CompositeRingBuilder.save()` atomic | Done | Section 1; experiments 5–11; `TestCompositeRingBuilder` save tests |
+| After an interrupted save, the last valid file is unchanged, loads, and supports ring position lookups | Done | Experiments 1, 2, 6, 7 |
+| Protect the file at every failure point: serialization, flush, `fsync`, and replacement | Done | Experiments 3, 8; unit tests |
+| Handle temporary files from failed saves; a stale temporary file must not block a save | Done | Experiments 2, 3, 7, 8, 10; unit tests |
+| Give concurrent saves distinct temporary names | Done | `NamedTemporaryFile` in both saves (section 2) |
+| Run Swift's existing suite together with new atomic-save tests | Done | Experiments 0, 5; 28 save tests added to Swift's unit suite |
